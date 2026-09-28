@@ -1,0 +1,1 @@
+ALTER TABLE `accounts` ADD `tax_id_normalized` text;
