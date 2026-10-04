@@ -1,13 +1,85 @@
 import type {Actor} from './auth';import {AccessError,requirePermission} from './auth';
 const now=()=>new Date().toISOString();const scopes=['OWN','TEAM','ALL'] as const;type Scope=typeof scopes[number];
-type Input={kind:string;id?:string;name?:string;email?:string;roleId?:string;teamId?:string;active?:boolean;scope?:Scope;managerUserId?:string|null;baseCurrency?:string;quoteCurrency?:string;rate?:number;effectiveDate?:string;inactivityDays?:number;permissions?:{permissionId:string;scope:Scope}[]};
+type Input={kind:string;id?:string;name?:string;email?:string;roleId?:string;teamIds?:string[];active?:boolean;scope?:Scope;managerUserId?:string|null;baseCurrency?:string;quoteCurrency?:string;rate?:number;effectiveDate?:string;inactivityDays?:number;permissions?:{permissionId:string;scope:Scope}[]};
 const can=(a:Actor,p:string)=>Boolean(a.permissions[p]);
+async function validTeamIds(db:Actor['db'],input:unknown){
+ const teamIds=[...new Set((Array.isArray(input)?input:[]).filter((x):x is string=>typeof x==='string').map(x=>x.trim()).filter(Boolean))];
+ if(!teamIds.length)return teamIds;
+ const placeholders=teamIds.map(()=>'?').join(',');
+ const row=await db.prepare(`SELECT count(*) AS total FROM teams WHERE id IN (${placeholders}) AND deleted_at IS NULL`).bind(...teamIds).first<{total:number}>();
+ if((row?.total??0)!==teamIds.length)throw new AccessError('INVALID','Une ou plusieurs équipes sont inconnues.');
+ return teamIds;
+}
 async function log(a:Actor,type:string,id:string,action:string,oldValue:unknown,next:unknown){await a.db.prepare('INSERT INTO audit_logs(id,user_id,timestamp,entity_type,entity_id,action,old_value,new_value) VALUES(?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),a.id,now(),type,id,action,oldValue?JSON.stringify(oldValue):null,JSON.stringify(next)).run()}
-export async function adminSnapshot(a:Actor){const capabilities={users:can(a,'admin.users'),teams:can(a,'admin.teams'),roles:can(a,'admin.roles'),rates:can(a,'admin.rates'),config:can(a,'admin.config'),audit:can(a,'audit.read'),sync:can(a,'data.sync')};if(!Object.values(capabilities).some(Boolean))throw new AccessError('FORBIDDEN','Vous n’avez pas accès à l’administration.');const db=a.db;const [users,teams,roles,permissions,rolePermissions,rates,pipelines,audit]=await Promise.all([
-db.prepare("SELECT u.id,u.name,u.email,u.role_id AS roleId,u.team_id AS teamId,u.active,u.created_at AS createdAt,COALESCE(ua.scope,'OWN') AS scope,CASE WHEN u.auth_id IS NOT NULL THEN 'AUTHORIZED' ELSE COALESCE(ua.site_access,'PENDING') END AS siteAccess,ua.last_login_at AS lastLoginAt,t.name AS teamName FROM users u LEFT JOIN user_access ua ON ua.user_id=u.id LEFT JOIN teams t ON t.id=u.team_id WHERE u.deleted_at IS NULL ORDER BY u.name").all(),db.prepare('SELECT t.id,t.name,COALESCE(ts.active,1) AS active,ts.manager_user_id AS managerUserId,COUNT(u.id) AS userCount FROM teams t LEFT JOIN team_settings ts ON ts.team_id=t.id LEFT JOIN users u ON u.team_id=t.id AND u.deleted_at IS NULL GROUP BY t.id,t.name,ts.active,ts.manager_user_id ORDER BY t.name').all(),db.prepare('SELECT id,name FROM roles ORDER BY id').all(),db.prepare('SELECT id,description FROM permissions ORDER BY id').all(),db.prepare('SELECT role_id AS roleId,permission_id AS permissionId,scope FROM role_permissions').all(),db.prepare('SELECT id,base_currency AS baseCurrency,quote_currency AS quoteCurrency,rate,effective_date AS effectiveDate,source FROM exchange_rates ORDER BY effective_date DESC').all(),db.prepare('SELECT id,name,inactivity_days AS inactivityDays FROM pipelines').all(),db.prepare('SELECT a.id,a.timestamp,a.entity_type AS entityType,a.entity_id AS entityId,a.action,u.name AS userName FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.timestamp DESC LIMIT 150').all()]);return {capabilities,users:users.results,teams:teams.results,roles:roles.results,permissions:permissions.results,rolePermissions:rolePermissions.results,rates:rates.results,pipelines:pipelines.results,audit:audit.results}}
+export async function adminSnapshot(a:Actor){
+ const capabilities={users:can(a,'admin.users'),teams:can(a,'admin.teams'),roles:can(a,'admin.roles'),rates:can(a,'admin.rates'),config:can(a,'admin.config'),audit:can(a,'audit.read'),sync:can(a,'data.sync')};
+ if(!Object.values(capabilities).some(Boolean))throw new AccessError('FORBIDDEN','Vous n’avez pas accès à l’administration.');
+ const db=a.db;
+ const [users,userTeams,teams,roles,permissions,rolePermissions,rates,pipelines,audit]=await Promise.all([
+  db.prepare("SELECT u.id,u.name,u.email,u.role_id AS roleId,u.active,u.created_at AS createdAt,COALESCE(ua.scope,'OWN') AS scope,CASE WHEN u.auth_id IS NOT NULL THEN 'AUTHORIZED' ELSE COALESCE(ua.site_access,'PENDING') END AS siteAccess,ua.last_login_at AS lastLoginAt FROM users u LEFT JOIN user_access ua ON ua.user_id=u.id WHERE u.deleted_at IS NULL ORDER BY u.name").all(),
+  db.prepare("SELECT ut.user_id AS userId,ut.team_id AS teamId,t.name AS teamName FROM user_teams ut JOIN teams t ON t.id=ut.team_id WHERE t.deleted_at IS NULL ORDER BY t.name").all<{userId:string;teamId:string;teamName:string}>(),
+  db.prepare("SELECT t.id,t.name,COALESCE(ts.active,1) AS active,ts.manager_user_id AS managerUserId,COUNT(DISTINCT u.id) AS userCount FROM teams t LEFT JOIN team_settings ts ON ts.team_id=t.id LEFT JOIN user_teams ut ON ut.team_id=t.id LEFT JOIN users u ON u.id=ut.user_id AND u.deleted_at IS NULL WHERE t.deleted_at IS NULL GROUP BY t.id,t.name,ts.active,ts.manager_user_id ORDER BY CASE t.id WHEN 'team-export' THEN 1 WHEN 'team-services-particuliers' THEN 2 WHEN 'team-services-paca' THEN 3 WHEN 'team-services' THEN 4 WHEN 'team-sales' THEN 5 WHEN 'team-monaco' THEN 6 ELSE 99 END,t.name").all(),
+  db.prepare('SELECT id,name FROM roles ORDER BY id').all(),
+  db.prepare('SELECT id,description FROM permissions ORDER BY id').all(),
+  db.prepare('SELECT role_id AS roleId,permission_id AS permissionId,scope FROM role_permissions').all(),
+  db.prepare('SELECT id,base_currency AS baseCurrency,quote_currency AS quoteCurrency,rate,effective_date AS effectiveDate,source FROM exchange_rates ORDER BY effective_date DESC').all(),
+  db.prepare('SELECT id,name,inactivity_days AS inactivityDays FROM pipelines').all(),
+  db.prepare('SELECT a.id,a.timestamp,a.entity_type AS entityType,a.entity_id AS entityId,a.action,u.name AS userName FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.timestamp DESC LIMIT 150').all(),
+ ]);
+ const memberships=new Map<string,{id:string;name:string}[]>();
+ for(const membership of userTeams.results){const list=memberships.get(membership.userId)??[];list.push({id:membership.teamId,name:membership.teamName});memberships.set(membership.userId,list)}
+ const userRows=users.results.map((user:any)=>{const list=memberships.get(user.id)??[];return {...user,teamIds:list.map(x=>x.id),teamNames:list.map(x=>x.name)}});
+ return {capabilities,users:userRows,teams:teams.results,roles:roles.results,permissions:permissions.results,rolePermissions:rolePermissions.results,rates:rates.results,pipelines:pipelines.results,audit:audit.results};
+}
 export async function adminMutation(a:Actor,i:Input){const db=a.db,t=now();
-if(i.kind==='create-user'){await requirePermission(a,'admin.users');const name=i.name?.trim(),email=i.email?.trim().toLowerCase();if(!name||!email||!i.roleId||!i.teamId||!scopes.includes(i.scope??'OWN'))throw new AccessError('INVALID','Nom, e-mail, rôle, équipe et périmètre sont requis.');const [role,team,exists]=await Promise.all([db.prepare('SELECT id FROM roles WHERE id=?').bind(i.roleId).first(),db.prepare('SELECT id FROM teams WHERE id=? AND deleted_at IS NULL').bind(i.teamId).first(),db.prepare('SELECT id FROM users WHERE lower(email)=lower(?) AND deleted_at IS NULL').bind(email).first()]);if(!role||!team)throw new AccessError('INVALID','Rôle ou équipe inconnu.');if(exists)throw new AccessError('CONFLICT','Cette adresse e-mail existe déjà.');const id=crypto.randomUUID();await db.batch([db.prepare('INSERT INTO users(id,email,name,role_id,team_id,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').bind(id,email,name,i.roleId,i.teamId,i.active===false?0:1,t,t),db.prepare("INSERT INTO user_access(user_id,scope,site_access,created_at,updated_at) VALUES(?,?, 'PENDING',?,?)").bind(id,i.scope??'OWN',t,t)]);await log(a,'users',id,'user.create',null,i);return {ok:true,id}}
-if(i.kind==='user'){await requirePermission(a,'admin.users');if(!i.id||!i.roleId||!i.teamId||!scopes.includes(i.scope??'OWN'))throw new AccessError('INVALID','Utilisateur ou paramètres invalides.');const u=await db.prepare('SELECT id,name,email,role_id AS roleId,team_id AS teamId,active,auth_id AS authId FROM users WHERE id=? AND deleted_at IS NULL').bind(i.id).first<{id:string;name:string;email:string|null;roleId:string;teamId:string;active:number;authId:string|null}>();if(!u)throw new AccessError('INVALID','Utilisateur introuvable.');if(u.authId&&(i.email?.trim().toLowerCase()||null)!==u.email)throw new AccessError('INVALID','L’adresse d’une identité liée ne peut pas être modifiée.');const [role,team,count]=await Promise.all([db.prepare('SELECT id FROM roles WHERE id=?').bind(i.roleId).first(),db.prepare('SELECT id FROM teams WHERE id=? AND deleted_at IS NULL').bind(i.teamId).first(),db.prepare("SELECT count(*) AS total FROM users WHERE role_id='SUPERADMIN' AND active=1 AND deleted_at IS NULL").first<{total:number}>()]);if(!role||!team)throw new AccessError('INVALID','Rôle ou équipe inconnu.');if(u.roleId==='SUPERADMIN'&&u.active&&((i.roleId!=='SUPERADMIN')||i.active===false)&&(count?.total??0)<=1)throw new AccessError('INVALID','Le dernier SuperAdmin actif ne peut pas être désactivé ou rétrogradé.');const n={name:i.name?.trim()||u.name,email:i.email?.trim().toLowerCase()||u.email,roleId:i.roleId,teamId:i.teamId,active:i.active===false?0:1,scope:i.scope};await db.batch([db.prepare('UPDATE users SET name=?,email=?,role_id=?,team_id=?,active=?,updated_at=? WHERE id=?').bind(n.name,n.email,n.roleId,n.teamId,n.active,t,i.id),db.prepare('UPDATE user_access SET scope=?,updated_at=? WHERE user_id=?').bind(n.scope,t,i.id)]);await log(a,'users',i.id,u.roleId!==n.roleId?'role.change':u.teamId!==n.teamId?'team.change':u.active!==n.active?'user.disable':'scope.change',u,n);return {ok:true,id:i.id}}
+if(i.kind==='create-user'){
+ await requirePermission(a,'admin.users');
+ const name=i.name?.trim(),email=i.email?.trim().toLowerCase();
+ if(!name||!email||!i.roleId||!scopes.includes(i.scope??'OWN'))throw new AccessError('INVALID','Nom, e-mail, rôle et périmètre sont requis.');
+ const teamIds=await validTeamIds(db,i.teamIds);
+ const [role,exists]=await Promise.all([
+  db.prepare('SELECT id FROM roles WHERE id=?').bind(i.roleId).first(),
+  db.prepare('SELECT id FROM users WHERE lower(email)=lower(?) AND deleted_at IS NULL').bind(email).first(),
+ ]);
+ if(!role)throw new AccessError('INVALID','Rôle inconnu.');
+ if(exists)throw new AccessError('CONFLICT','Cette adresse e-mail existe déjà.');
+ const id=crypto.randomUUID();
+ await db.batch([
+  db.prepare('INSERT INTO users(id,email,name,role_id,team_id,active,created_at,updated_at) VALUES(?,?,?,?,NULL,?,?,?)').bind(id,email,name,i.roleId,i.active===false?0:1,t,t),
+  db.prepare("INSERT INTO user_access(user_id,scope,site_access,created_at,updated_at) VALUES(?,?, 'PENDING',?,?)").bind(id,i.scope??'OWN',t,t),
+  ...teamIds.map(teamId=>db.prepare('INSERT INTO user_teams(user_id,team_id,created_at) VALUES(?,?,?)').bind(id,teamId,t)),
+ ]);
+ await log(a,'users',id,'user.create',null,{...i,teamIds});
+ return {ok:true,id};
+}
+if(i.kind==='user'){
+ await requirePermission(a,'admin.users');
+ if(!i.id||!i.roleId||!scopes.includes(i.scope??'OWN'))throw new AccessError('INVALID','Utilisateur ou paramètres invalides.');
+ const teamIds=await validTeamIds(db,i.teamIds);
+ const [u,oldMemberships]=await Promise.all([
+  db.prepare('SELECT id,name,email,role_id AS roleId,active,auth_id AS authId FROM users WHERE id=? AND deleted_at IS NULL').bind(i.id).first<{id:string;name:string;email:string|null;roleId:string;active:number;authId:string|null}>(),
+  db.prepare('SELECT team_id AS teamId FROM user_teams WHERE user_id=? ORDER BY team_id').bind(i.id).all<{teamId:string}>(),
+ ]);
+ if(!u)throw new AccessError('INVALID','Utilisateur introuvable.');
+ if(u.authId&&(i.email?.trim().toLowerCase()||null)!==u.email)throw new AccessError('INVALID','L’adresse d’une identité liée ne peut pas être modifiée.');
+ const [role,count]=await Promise.all([
+  db.prepare('SELECT id FROM roles WHERE id=?').bind(i.roleId).first(),
+  db.prepare("SELECT count(*) AS total FROM users WHERE role_id='SUPERADMIN' AND active=1 AND deleted_at IS NULL").first<{total:number}>(),
+ ]);
+ if(!role)throw new AccessError('INVALID','Rôle inconnu.');
+ if(u.roleId==='SUPERADMIN'&&u.active&&((i.roleId!=='SUPERADMIN')||i.active===false)&&(count?.total??0)<=1)throw new AccessError('INVALID','Le dernier SuperAdmin actif ne peut pas être désactivé ou rétrogradé.');
+ const oldTeamIds=oldMemberships.results.map(x=>x.teamId);
+ const n={name:i.name?.trim()||u.name,email:i.email?.trim().toLowerCase()||u.email,roleId:i.roleId,teamIds,active:i.active===false?0:1,scope:i.scope};
+ await db.batch([
+  db.prepare('UPDATE users SET name=?,email=?,role_id=?,team_id=NULL,active=?,updated_at=? WHERE id=?').bind(n.name,n.email,n.roleId,n.active,t,i.id),
+  db.prepare('UPDATE user_access SET scope=?,updated_at=? WHERE user_id=?').bind(n.scope,t,i.id),
+  db.prepare('DELETE FROM user_teams WHERE user_id=?').bind(i.id),
+  ...teamIds.map(teamId=>db.prepare('INSERT INTO user_teams(user_id,team_id,created_at) VALUES(?,?,?)').bind(i.id,teamId,t)),
+ ]);
+ const teamsChanged=JSON.stringify([...oldTeamIds].sort())!==JSON.stringify([...teamIds].sort());
+ await log(a,'users',i.id,u.roleId!==n.roleId?'role.change':teamsChanged?'team.change':u.active!==n.active?'user.disable':'scope.change',{...u,teamIds:oldTeamIds},n);
+ return {ok:true,id:i.id};
+}
 if(i.kind==='team'){await requirePermission(a,'admin.teams');if(!i.name?.trim())throw new AccessError('INVALID','Nom d’équipe requis.');const id=i.id||crypto.randomUUID();if(i.managerUserId&&!await db.prepare('SELECT id FROM users WHERE id=? AND active=1 AND deleted_at IS NULL').bind(i.managerUserId).first())throw new AccessError('INVALID','Responsable d’équipe invalide.');await db.batch([db.prepare('INSERT INTO teams(id,name,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at').bind(id,i.name.trim(),t,t),db.prepare('INSERT INTO team_settings(team_id,manager_user_id,active,updated_at) VALUES(?,?,?,?) ON CONFLICT(team_id) DO UPDATE SET manager_user_id=excluded.manager_user_id,active=excluded.active,updated_at=excluded.updated_at').bind(id,i.managerUserId??null,i.active===false?0:1,t)]);await log(a,'teams',id,i.active===false?'team.disable':'team.save',null,i);return {ok:true,id}}
 if(i.kind==='role-permissions'){await requirePermission(a,'admin.roles');if(!i.roleId||i.roleId==='SUPERADMIN'||!i.permissions)throw new AccessError('INVALID','Les droits SuperAdmin sont système et ne peuvent pas être retirés.');const ids=[...new Set(i.permissions.map(p=>p.permissionId))];if(ids.length!==i.permissions.length||i.permissions.some(p=>!scopes.includes(p.scope)))throw new AccessError('INVALID','Matrice de droits invalide.');const valid=await db.prepare(`SELECT count(*) AS total FROM permissions WHERE id IN (${ids.map(()=>'?').join(',')||"''"})`).bind(...ids).first<{total:number}>();if((valid?.total??0)!==ids.length)throw new AccessError('INVALID','Permission inconnue.');const old=await db.prepare('SELECT permission_id AS permissionId,scope FROM role_permissions WHERE role_id=?').bind(i.roleId).all();await db.batch([db.prepare('DELETE FROM role_permissions WHERE role_id=?').bind(i.roleId),...i.permissions.map(p=>db.prepare('INSERT INTO role_permissions(role_id,permission_id,scope) VALUES(?,?,?)').bind(i.roleId,p.permissionId,p.scope))]);await log(a,'roles',i.roleId,'role.permissions.change',old.results,i.permissions);return {ok:true,id:i.roleId}}
 if(i.kind==='rate'){await requirePermission(a,'admin.rates');if(!['USD','GBP','AED','EUR'].includes(i.baseCurrency??'')||(i.quoteCurrency??'EUR')!=='EUR'||!Number.isFinite(Number(i.rate))||Number(i.rate)<=0||!/^\d{4}-\d{2}-\d{2}$/.test(i.effectiveDate??''))throw new AccessError('INVALID','Taux ou date invalide.');const id=crypto.randomUUID();await db.prepare('INSERT INTO exchange_rates(id,base_currency,quote_currency,rate,effective_date,source,created_at,created_by) VALUES(?,?,?,?,?,?,?,?)').bind(id,i.baseCurrency,'EUR',Number(i.rate),i.effectiveDate,'Saisie manuelle',t,a.id).run();await log(a,'exchange_rates',id,'rate.create',null,i);return {ok:true,id}}
