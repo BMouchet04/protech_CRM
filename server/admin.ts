@@ -16,7 +16,7 @@ export async function adminSnapshot(a:Actor){
  if(!Object.values(capabilities).some(Boolean))throw new AccessError('FORBIDDEN','Vous n’avez pas accès à l’administration.');
  const db=a.db;
  const [users,userTeams,teams,roles,permissions,rolePermissions,rates,pipelines,audit]=await Promise.all([
-  db.prepare("SELECT u.id,u.name,u.email,u.role_id AS roleId,u.active,u.created_at AS createdAt,COALESCE(ua.scope,'OWN') AS scope,CASE WHEN u.auth_id IS NOT NULL THEN 'AUTHORIZED' ELSE COALESCE(ua.site_access,'PENDING') END AS siteAccess,ua.last_login_at AS lastLoginAt FROM users u LEFT JOIN user_access ua ON ua.user_id=u.id WHERE u.deleted_at IS NULL ORDER BY u.name").all(),
+  db.prepare("SELECT u.id,u.name,u.email,u.role_id AS roleId,u.active,u.created_at AS createdAt,COALESCE(ua.scope,'OWN') AS scope,CASE WHEN u.auth_id IS NOT NULL THEN 'AUTHORIZED' ELSE COALESCE(ua.site_access,'PENDING') END AS siteAccess,ua.last_login_at AS lastLoginAt FROM users u LEFT JOIN user_access ua ON ua.user_id=u.id WHERE u.deleted_at IS NULL ORDER BY u.name").all<{id:string;name:string;email:string|null;roleId:string;active:number;createdAt:string;scope:Scope;siteAccess:string;lastLoginAt:string|null}>(),
   db.prepare("SELECT ut.user_id AS userId,ut.team_id AS teamId,t.name AS teamName FROM user_teams ut JOIN teams t ON t.id=ut.team_id WHERE t.deleted_at IS NULL ORDER BY t.name").all<{userId:string;teamId:string;teamName:string}>(),
   db.prepare("SELECT t.id,t.name,COALESCE(ts.active,1) AS active,ts.manager_user_id AS managerUserId,COUNT(DISTINCT u.id) AS userCount FROM teams t LEFT JOIN team_settings ts ON ts.team_id=t.id LEFT JOIN user_teams ut ON ut.team_id=t.id LEFT JOIN users u ON u.id=ut.user_id AND u.deleted_at IS NULL WHERE t.deleted_at IS NULL GROUP BY t.id,t.name,ts.active,ts.manager_user_id ORDER BY CASE t.id WHEN 'team-export' THEN 1 WHEN 'team-services-particuliers' THEN 2 WHEN 'team-services-paca' THEN 3 WHEN 'team-services' THEN 4 WHEN 'team-sales' THEN 5 WHEN 'team-monaco' THEN 6 ELSE 99 END,t.name").all(),
   db.prepare('SELECT id,name FROM roles ORDER BY id').all(),
@@ -28,7 +28,7 @@ export async function adminSnapshot(a:Actor){
  ]);
  const memberships=new Map<string,{id:string;name:string}[]>();
  for(const membership of userTeams.results){const list=memberships.get(membership.userId)??[];list.push({id:membership.teamId,name:membership.teamName});memberships.set(membership.userId,list)}
- const userRows=users.results.map((user:any)=>{const list=memberships.get(user.id)??[];return {...user,teamIds:list.map(x=>x.id),teamNames:list.map(x=>x.name)}});
+ const userRows=users.results.map(user=>{const list=memberships.get(user.id)??[];return {...user,teamIds:list.map(x=>x.id),teamNames:list.map(x=>x.name)}});
  return {capabilities,users:userRows,teams:teams.results,roles:roles.results,permissions:permissions.results,rolePermissions:rolePermissions.results,rates:rates.results,pipelines:pipelines.results,audit:audit.results};
 }
 export async function adminMutation(a:Actor,i:Input){const db=a.db,t=now();
