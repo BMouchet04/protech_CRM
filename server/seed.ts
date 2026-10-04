@@ -9,9 +9,18 @@ import {normalizeDomain,normalizeEmail,normalizeName,normalizePhone,normalizeTax
 type DB=NonNullable<typeof env.DB>;
 const iso=()=>new Date().toISOString();
 const roles=['SUPERADMIN','DIRECTION','SALES_MANAGER','COMMERCIAL','CHARGE_AFFAIRES','ADMIN_COMMERCIAL','READ_ONLY'];
-export const permissionList=['account.read','account.create','account.update','account.delete','account.assign','contact.read','contact.create','contact.update','contact.delete','contact.assign','prospect.read','prospect.create','prospect.update','prospect.delete','prospect.assign','prospect.convert','opportunity.read','opportunity.create','opportunity.update','opportunity.delete','opportunity.assign','opportunity.win','opportunity.lose','task.read','task.create','task.update','task.delete','task.assign','task.complete','activity.read','activity.create','activity.delete','forecast.read','admin.users','admin.roles','admin.teams','admin.rates','admin.config','audit.read','data.export'];
+const crmTeams=[
+ ['team-export','Sales export'],
+ ['team-services-particuliers','Services Particuliers'],
+ ['team-services-paca','Services PACA'],
+ ['team-services','Services France'],
+ ['team-sales','Sales France'],
+ ['team-monaco','Services Monaco'],
+] as const;
+export const permissionList=['account.read','account.create','account.update','account.delete','account.assign','contact.read','contact.create','contact.update','contact.delete','contact.assign','prospect.read','prospect.create','prospect.update','prospect.delete','prospect.assign','prospect.convert','opportunity.read','opportunity.create','opportunity.update','opportunity.delete','opportunity.assign','opportunity.win','opportunity.lose','task.read','task.create','task.update','task.delete','task.assign','task.complete','activity.read','activity.create','activity.delete','forecast.read','admin.users','admin.roles','admin.teams','admin.rates','admin.config','audit.read','data.export','data.sync'];
 const grant=(role:string,permission:string):'OWN'|'TEAM'|'ALL'|null=>{
  if(role==='SUPERADMIN')return 'ALL';
+ if(permission==='data.sync')return role==='DIRECTION'?'ALL':role==='SALES_MANAGER'?'TEAM':null;
  if(role==='DIRECTION')return permission.startsWith('admin.')||permission==='audit.read'?null:'ALL';
  if(role==='SALES_MANAGER')return permission.startsWith('admin.')?null:'TEAM';
  if(role==='READ_ONLY')return permission.endsWith('.read')?'ALL':null;
@@ -26,10 +35,9 @@ export async function ensureDevSeed(db:DB,identity:{userId:string;email:string})
  for(const role of roles)add('INSERT OR IGNORE INTO roles(id,name) VALUES(?,?)',role,role);
  for(const p of permissionList)add('INSERT OR IGNORE INTO permissions(id,description) VALUES(?,?)',p,p);
  for(const role of roles)for(const p of permissionList){const scope=grant(role,p);if(scope)add('INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope) VALUES(?,?,?)',role,p,scope)}
- const teamDefs=[['team-services','Services France'],['team-sales','Sales France'],['team-export','Export'],['team-management','Management']];
- for(const [id,name] of teamDefs)add('INSERT OR IGNORE INTO teams(id,name,created_at,updated_at) VALUES(?,?,?,?)',id,name,now,now);
- const fixtures=[['u1','Alice Martin','SUPERADMIN','team-management',identity.userId,identity.email],['u2','Pierre Lambert','SALES_MANAGER','team-services',null,null],['u3','Samira Benali','COMMERCIAL','team-export',null,null],['u4','Nicolas Rey','CHARGE_AFFAIRES','team-services',null,null],['u5','Claire Morel','DIRECTION','team-management',null,null],['u6','Emma Renard','ADMIN_COMMERCIAL','team-sales',null,null],['u7','Lucas Girard','READ_ONLY','team-sales',null,null],['u8','Maya Laurent','COMMERCIAL','team-sales',null,null]];
- for(const [id,name,role,team,auth,email] of fixtures)add('INSERT OR IGNORE INTO users(id,auth_id,email,name,role_id,team_id,active,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?)',id,auth,email,name,role,team,now,now);
+ for(const [id,name] of crmTeams)add('INSERT OR IGNORE INTO teams(id,name,created_at,updated_at) VALUES(?,?,?,?)',id,name,now,now);
+ const fixtures=[['u1','Alice Martin','SUPERADMIN',identity.userId,identity.email],['u2','Pierre Lambert','SALES_MANAGER',null,null],['u3','Samira Benali','COMMERCIAL',null,null],['u4','Nicolas Rey','CHARGE_AFFAIRES',null,null],['u5','Claire Morel','DIRECTION',null,null],['u6','Emma Renard','ADMIN_COMMERCIAL',null,null],['u7','Lucas Girard','READ_ONLY',null,null],['u8','Maya Laurent','COMMERCIAL',null,null]];
+ for(const [id,name,role,auth,email] of fixtures)add('INSERT OR IGNORE INTO users(id,auth_id,email,name,role_id,team_id,active,created_at,updated_at) VALUES(?,?,?,?,?,NULL,1,?,?)',id,auth,email,name,role,now,now);
  for(const line of ['Services','Produits France','Export','Network'])add('INSERT OR IGNORE INTO business_lines(id,name) VALUES(?,?)',line,line);
  for(const code of ['EUR','USD','GBP','AED'])add('INSERT OR IGNORE INTO currencies(code,name) VALUES(?,?)',code,code);
  for(const label of lostReasons)add('INSERT OR IGNORE INTO loss_reasons(id,label) VALUES(?,?)',normalizeName(label),label);
@@ -51,18 +59,36 @@ export async function ensureServiceCenters(db:DB){const existing=await db.prepar
  db.prepare('INSERT OR IGNORE INTO service_centers(id,name,active) VALUES(?,?,1)').bind('castagniers','Castagniers'),
 ])}
 
-/** Additive administration metadata. It is safe for databases created before phase 5G. */
-export async function ensureAdminExtensions(db:DB){await db.batch([
- db.prepare('INSERT OR IGNORE INTO teams(id,name,created_at,updated_at) VALUES(?,?,?,?)').bind('team-monaco','Monaco',iso(),iso()),
- db.prepare('CREATE TABLE IF NOT EXISTS user_access (user_id TEXT PRIMARY KEY REFERENCES users(id), scope TEXT NOT NULL DEFAULT \'OWN\', site_access TEXT NOT NULL DEFAULT \'PENDING\', invited_at TEXT, last_login_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)'),
- db.prepare('CREATE TABLE IF NOT EXISTS team_settings (team_id TEXT PRIMARY KEY REFERENCES teams(id), manager_user_id TEXT REFERENCES users(id), active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)'),
- ...permissionList.map(permission=>db.prepare('INSERT OR IGNORE INTO permissions(id,description) VALUES(?,?)').bind(permission,permission)),
- db.prepare("DELETE FROM role_permissions WHERE role_id IN ('DIRECTION','ADMIN_COMMERCIAL') AND permission_id LIKE 'admin.%'"),
- db.prepare("DELETE FROM role_permissions WHERE role_id='DIRECTION' AND permission_id='audit.read'"),
- db.prepare("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope) SELECT 'SUPERADMIN',id,'ALL' FROM permissions"),
- db.prepare("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope) SELECT 'DIRECTION',id,'ALL' FROM permissions WHERE id NOT LIKE 'admin.%' AND id<>'audit.read'"),
- db.prepare("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope) SELECT 'SALES_MANAGER',id,'TEAM' FROM permissions WHERE id NOT LIKE 'admin.%' AND id<>'data.export'"),
- db.prepare("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope) SELECT 'READ_ONLY',id,'ALL' FROM permissions WHERE id LIKE '%.read' OR id='forecast.read'"),
- db.prepare("INSERT OR IGNORE INTO user_access(user_id,scope,site_access,created_at,updated_at) SELECT id,CASE role_id WHEN 'SUPERADMIN' THEN 'ALL' WHEN 'DIRECTION' THEN 'ALL' WHEN 'SALES_MANAGER' THEN 'TEAM' WHEN 'ADMIN_COMMERCIAL' THEN 'TEAM' ELSE 'OWN' END,CASE WHEN auth_id IS NULL THEN 'PENDING' ELSE 'AUTHORIZED' END,?,? FROM users").bind(iso(),iso()),
- db.prepare("INSERT OR IGNORE INTO team_settings(team_id,active,updated_at) SELECT id,1,? FROM teams WHERE deleted_at IS NULL").bind(iso()),
- ])}
+/** Additive administration metadata and one-time team-model migration. */
+export async function ensureAdminExtensions(db:DB){
+ const t=iso();
+ await db.batch([
+  db.prepare('CREATE TABLE IF NOT EXISTS user_access (user_id TEXT PRIMARY KEY REFERENCES users(id), scope TEXT NOT NULL DEFAULT \'OWN\', site_access TEXT NOT NULL DEFAULT \'PENDING\', invited_at TEXT, last_login_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)'),
+  db.prepare('CREATE TABLE IF NOT EXISTS team_settings (team_id TEXT PRIMARY KEY REFERENCES teams(id), manager_user_id TEXT REFERENCES users(id), active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)'),
+  db.prepare('CREATE TABLE IF NOT EXISTS user_teams (user_id TEXT NOT NULL REFERENCES users(id), team_id TEXT NOT NULL REFERENCES teams(id), created_at TEXT NOT NULL, PRIMARY KEY(user_id,team_id))'),
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_user_teams_team ON user_teams(team_id)'),
+  ...permissionList.map(permission=>db.prepare('INSERT OR IGNORE INTO permissions(id,description) VALUES(?,?)').bind(permission,permission)),
+  db.prepare("DELETE FROM role_permissions WHERE role_id IN ('DIRECTION','ADMIN_COMMERCIAL') AND permission_id LIKE 'admin.%'"),
+  db.prepare("DELETE FROM role_permissions WHERE role_id='DIRECTION' AND permission_id='audit.read'"),
+  db.prepare("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope) SELECT 'SUPERADMIN',id,'ALL' FROM permissions"),
+  db.prepare("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope) SELECT 'DIRECTION',id,'ALL' FROM permissions WHERE id NOT LIKE 'admin.%' AND id<>'audit.read'"),
+  db.prepare("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope) SELECT 'SALES_MANAGER',id,'TEAM' FROM permissions WHERE id NOT LIKE 'admin.%' AND id<>'data.export'"),
+  db.prepare("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope) SELECT 'READ_ONLY',id,'ALL' FROM permissions WHERE id LIKE '%.read' OR id='forecast.read'"),
+  db.prepare("INSERT OR IGNORE INTO user_access(user_id,scope,site_access,created_at,updated_at) SELECT id,CASE role_id WHEN 'SUPERADMIN' THEN 'ALL' WHEN 'DIRECTION' THEN 'ALL' WHEN 'SALES_MANAGER' THEN 'TEAM' WHEN 'ADMIN_COMMERCIAL' THEN 'TEAM' ELSE 'OWN' END,CASE WHEN auth_id IS NULL THEN 'PENDING' ELSE 'AUTHORIZED' END,?,? FROM users").bind(t,t),
+ ]);
+ const migrated=await db.prepare('SELECT id FROM seed_state WHERE id=?').bind('teams-multi-v1').first();
+ if(!migrated){
+  const desiredIds=crmTeams.map(([id])=>id);
+  await db.batch([
+   ...crmTeams.map(([id,name])=>db.prepare('INSERT INTO teams(id,name,created_at,updated_at,deleted_at,deleted_by) VALUES(?,?,?,?,NULL,NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at,deleted_at=NULL,deleted_by=NULL').bind(id,name,t,t)),
+   db.prepare(`UPDATE teams SET deleted_at=?,deleted_by='system',updated_at=? WHERE id NOT IN (${desiredIds.map(()=>'?').join(',')}) AND deleted_at IS NULL`).bind(t,t,...desiredIds),
+   db.prepare('DELETE FROM user_teams'),
+   db.prepare('UPDATE users SET team_id=NULL,updated_at=? WHERE team_id IS NOT NULL').bind(t),
+   db.prepare(`UPDATE team_settings SET manager_user_id=NULL,active=0,updated_at=? WHERE team_id NOT IN (${desiredIds.map(()=>'?').join(',')})`).bind(t,...desiredIds),
+   db.prepare('INSERT OR IGNORE INTO seed_state(id,created_at,kind) VALUES(?,?,?)').bind('teams-multi-v1',t,'configuration-migration'),
+  ]);
+ } else {
+  await db.batch(crmTeams.map(([id,name])=>db.prepare('INSERT OR IGNORE INTO teams(id,name,created_at,updated_at) VALUES(?,?,?,?)').bind(id,name,t,t)));
+ }
+ await db.prepare("INSERT OR IGNORE INTO team_settings(team_id,active,updated_at) SELECT id,1,? FROM teams WHERE deleted_at IS NULL").bind(t).run();
+}
