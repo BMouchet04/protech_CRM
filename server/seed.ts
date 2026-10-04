@@ -9,9 +9,10 @@ import {normalizeDomain,normalizeEmail,normalizeName,normalizePhone,normalizeTax
 type DB=NonNullable<typeof env.DB>;
 const iso=()=>new Date().toISOString();
 const roles=['SUPERADMIN','DIRECTION','SALES_MANAGER','COMMERCIAL','CHARGE_AFFAIRES','ADMIN_COMMERCIAL','READ_ONLY'];
-export const permissionList=['account.read','account.create','account.update','account.delete','account.assign','contact.read','contact.create','contact.update','contact.delete','contact.assign','prospect.read','prospect.create','prospect.update','prospect.delete','prospect.assign','prospect.convert','opportunity.read','opportunity.create','opportunity.update','opportunity.delete','opportunity.assign','opportunity.win','opportunity.lose','task.read','task.create','task.update','task.delete','task.assign','task.complete','activity.read','activity.create','activity.delete','forecast.read','admin.users','admin.roles','admin.teams','admin.rates','admin.config','audit.read','data.export'];
+export const permissionList=['account.read','account.create','account.update','account.delete','account.assign','contact.read','contact.create','contact.update','contact.delete','contact.assign','prospect.read','prospect.create','prospect.update','prospect.delete','prospect.assign','prospect.convert','opportunity.read','opportunity.create','opportunity.update','opportunity.delete','opportunity.assign','opportunity.win','opportunity.lose','task.read','task.create','task.update','task.delete','task.assign','task.complete','activity.read','activity.create','activity.delete','forecast.read','admin.users','admin.roles','admin.teams','admin.rates','admin.config','audit.read','data.export','data.sync'];
 const grant=(role:string,permission:string):'OWN'|'TEAM'|'ALL'|null=>{
  if(role==='SUPERADMIN')return 'ALL';
+ if(permission==='data.sync')return role==='DIRECTION'?'ALL':role==='SALES_MANAGER'?'TEAM':null;
  if(role==='DIRECTION')return permission.startsWith('admin.')||permission==='audit.read'?null:'ALL';
  if(role==='SALES_MANAGER')return permission.startsWith('admin.')?null:'TEAM';
  if(role==='READ_ONLY')return permission.endsWith('.read')?'ALL':null;
